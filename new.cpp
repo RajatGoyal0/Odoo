@@ -16,9 +16,6 @@ struct Tile {
     int elevation{};
     bool walkable{true};
     char type{'G'}; // G=Grass, W=Water, M=Mountain
-
-    explicit Tile(int elevation = 0, bool walkable = true, char type = 'G')
-        : elevation(elevation), walkable(walkable), type(type) {}
 };
 
 class Level {
@@ -45,9 +42,10 @@ public:
     void save(const std::string& filename) const {
         std::ofstream out(filename, std::ios::binary);
         if (!out) return;
+
         for (const auto& column : tiles) {
             for (const auto& tile : column) {
-                const std::byte* data = reinterpret_cast<const std::byte*>(&tile);
+                auto data = reinterpret_cast<const std::byte*>(&tile); // replaced type with auto
                 out.write(reinterpret_cast<const char*>(data), sizeof(Tile));
             }
         }
@@ -56,9 +54,10 @@ public:
     void load(const std::string& filename) {
         std::ifstream in(filename, std::ios::binary);
         if (!in) return;
+
         for (auto& column : tiles) {
             for (auto& tile : column) {
-                std::byte* data = reinterpret_cast<std::byte*>(&tile);
+                auto data = reinterpret_cast<std::byte*>(&tile); // replaced type with auto
                 in.read(reinterpret_cast<char*>(data), sizeof(Tile));
             }
         }
