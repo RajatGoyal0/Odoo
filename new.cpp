@@ -5,7 +5,7 @@
 #include <random>
 #include <array>
 #include <string>
-#include <cstddef>
+#include <cstddef> // for std::byte
 #include <cstdint>
 
 constexpr int MAP_WIDTH = 100;
@@ -23,7 +23,6 @@ struct Tile {
 
 class Level {
 public:
-    // tiles initialized in-class (avoiding constructor init list)
     std::vector<std::vector<Tile>> tiles = std::vector(MAP_WIDTH, std::vector<Tile>(MAP_HEIGHT));
 
     void generate() {
@@ -48,7 +47,7 @@ public:
         if (!out) return;
         for (const auto& column : tiles) {
             for (const auto& tile : column) {
-                const auto* data = reinterpret_cast<const std::byte*>(&tile);
+                const std::byte* data = reinterpret_cast<const std::byte*>(&tile);
                 out.write(reinterpret_cast<const char*>(data), sizeof(Tile));
             }
         }
@@ -59,7 +58,7 @@ public:
         if (!in) return;
         for (auto& column : tiles) {
             for (auto& tile : column) {
-                auto* data = reinterpret_cast<std::byte*>(&tile);
+                std::byte* data = reinterpret_cast<std::byte*>(&tile);
                 in.read(reinterpret_cast<char*>(data), sizeof(Tile));
             }
         }
