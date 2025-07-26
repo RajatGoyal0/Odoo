@@ -5,14 +5,13 @@
 #include <random>
 #include <array>
 #include <string>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
 constexpr int MAP_WIDTH = 100;
 constexpr int MAP_HEIGHT = 100;
 constexpr int MAX_ELEVATION = 20;
 
-// Modular tile structure
 struct Tile {
     int elevation{};
     bool walkable{true};
@@ -22,10 +21,10 @@ struct Tile {
         : elevation(elevation), walkable(walkable), type(type) {}
 };
 
-// Level data
 class Level {
 public:
-    Level() : tiles(MAP_WIDTH, std::vector<Tile>(MAP_HEIGHT)) {}
+    // tiles initialized in-class (avoiding constructor init list)
+    std::vector<std::vector<Tile>> tiles = std::vector(MAP_WIDTH, std::vector<Tile>(MAP_HEIGHT));
 
     void generate() {
         std::mt19937 rng{123};
@@ -46,6 +45,7 @@ public:
 
     void save(const std::string& filename) const {
         std::ofstream out(filename, std::ios::binary);
+        if (!out) return;
         for (const auto& column : tiles) {
             for (const auto& tile : column) {
                 const auto* data = reinterpret_cast<const std::byte*>(&tile);
@@ -56,6 +56,7 @@ public:
 
     void load(const std::string& filename) {
         std::ifstream in(filename, std::ios::binary);
+        if (!in) return;
         for (auto& column : tiles) {
             for (auto& tile : column) {
                 auto* data = reinterpret_cast<std::byte*>(&tile);
@@ -74,7 +75,6 @@ public:
     }
 
 private:
-    std::vector<std::vector<Tile>> tiles;
     std::vector<std::pair<int, int>> pointsOfInterest;
 
     void placePointsOfInterest(std::mt19937& rng) {
@@ -82,7 +82,9 @@ private:
         auto distY = std::uniform_int_distribution<>(10, MAP_HEIGHT - 10);
 
         for (int i = 0; i < 5; ++i) {
-            pointsOfInterest.emplace_back(distX(rng), distY(rng));
+            int x = distX(rng);
+            int y = distY(rng);
+            pointsOfInterest.emplace_back(x, y);
         }
     }
 
@@ -97,43 +99,55 @@ private:
             auto visited = std::vector(MAP_WIDTH, std::vector(MAP_HEIGHT, false));
             auto prev = std::vector(MAP_WIDTH, std::vector(MAP_HEIGHT, std::pair{-1, -1}));
             std::queue<std::pair<int, int>> q;
-
             visited[sx][sy] = true;
             q.emplace(sx, sy);
 
-            while (!q.empty()) {
-                auto [x, y] = q.front();
-                q.pop();
-                if (x == ex && y == ey) break;
-
-                for (std::size_t d = 0; d < dx.size(); ++d) {
-                    int nx = x + dx[d];
-                    int ny = y + dy[d];
-                    if (!isValid(nx, ny) || visited[nx][ny]) continue;
-
-                    visited[nx][ny] = true;
-                    prev[nx][ny] = {x, y};
-                    q.emplace(nx, ny);
-                }
-            }
+            if (!bfsToTarget(q, visited, prev, ex, ey, dx, dy)) continue;
 
             tracePath(prev, sx, sy, ex, ey);
         }
     }
 
-    bool isValid(int x, int y) const {
-        return x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT && tiles[x][y].walkable;
+    bool bfsToTarget(std::queue<std::pair<int, int>>& q,
+                     std::vector<std::vector<bool>>& visited,
+                     std::vector<std::vector<std::pair<int, int>>>& prev,
+                     int ex, int ey,
+                     const std::array<int, 4>& dx,
+                     const std::array<int, 4>& dy) {
+        while (!q.empty()) {
+            auto [x, y] = q.front();
+            q.pop();
+
+            if (x == ex && y == ey) return true;
+
+            for (std::size_t d = 0; d < dx.size(); ++d) {
+                int nx = x + dx[d];
+                int ny = y + dy[d];
+                if (!isValid(nx, ny) || visited[nx][ny]) continue;
+
+                visited[nx][ny] = true;
+                prev[nx][ny] = {x, y};
+                q.emplace(nx, ny);
+            }
+        }
+        return false;
     }
 
-    void tracePath(const auto& prev, int sx, int sy, int ex, int ey) {
-        int x = ex, y = ey;
+    void tracePath(const std::vector<std::vector<std::pair<int, int>>>& prev,
+                   int sx, int sy, int ex, int ey) {
+        int x = ex;
+        int y = ey;
         while (!(x == sx && y == sy)) {
             auto [px, py] = prev[x][y];
             if (px == -1 && py == -1) break;
-            tiles[x][y].type = 'P'; // P = Path
+            tiles[x][y].type = 'P';
             x = px;
             y = py;
         }
+    }
+
+    bool isValid(int x, int y) const {
+        return x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT && tiles[x][y].walkable;
     }
 };
 
@@ -142,9 +156,9 @@ int main() {
     level.generate();
     level.save("level.dat");
 
-    Level loadedLevel;
-    loadedLevel.load("level.dat");
+    Level loaded;
+    loaded.load("level.dat");
 
-    loadedLevel.debugVisualize();
+    loaded.debugVisualize();
     return 0;
 }
