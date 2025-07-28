@@ -46,93 +46,43 @@ Space: O(n*m) for level data, O(1) for algorithms
 #include <limits>
 #include <memory>
 #include <new>
+#include <type_traits>
 
-// Compatible expected implementation for older compilers
+// Simplified expected implementation using optional-like approach
 template<typename T, typename E>
 class expected {
 private:
-    union Storage {
-        T value;
-        E error;
-        Storage() {}
-        ~Storage() {}
-    };
-    
-    Storage storage;
-    bool has_val;
+    std::optional<T> value_;
+    std::optional<E> error_;
     
 public:
-    expected(const T& v) : has_val(true) { 
-        new(&storage.value) T(v); 
-    }
-    
-    expected(T&& v) : has_val(true) { 
-        new(&storage.value) T(std::move(v)); 
-    }
+    // Value constructors
+    expected(const T& v) : value_(v) {}
+    expected(T&& v) : value_(std::move(v)) {}
     
     template<typename... Args>
-    explicit expected(std::in_place_t, Args&&... args) : has_val(true) {
-        new(&storage.value) T(std::forward<Args>(args)...);
-    }
+    explicit expected(std::in_place_t, Args&&... args) : value_(std::in_place, std::forward<Args>(args)...) {}
     
+    // Error constructor
     template<typename U> requires std::convertible_to<U, E>
-    expected(U&& e) : has_val(false) { 
-        new(&storage.error) E(std::forward<U>(e)); 
-    }
+    expected(U&& e) : error_(std::forward<U>(e)) {}
     
-    // Copy constructor
-    expected(const expected& other) : has_val(other.has_val) {
-        if (has_val) {
-            new(&storage.value) T(other.storage.value);
-        } else {
-            new(&storage.error) E(other.storage.error);
-        }
-    }
+    // Copy and move constructors
+    expected(const expected&) = default;
+    expected(expected&&) = default;
+    expected& operator=(const expected&) = default;
+    expected& operator=(expected&&) = default;
+    ~expected() = default;
     
-    // Move constructor  
-    expected(expected&& other) noexcept : has_val(other.has_val) {
-        if (has_val) {
-            new(&storage.value) T(std::move(other.storage.value));
-        } else {
-            new(&storage.error) E(std::move(other.storage.error));
-        }
-    }
+    bool has_value() const noexcept { return value_.has_value(); }
+    explicit operator bool() const noexcept { return has_value(); }
     
-    // Copy assignment
-    expected& operator=(const expected& other) {
-        if (this != &other) {
-            this->~expected();
-            new(this) expected(other);
-        }
-        return *this;
-    }
+    T& operator*() & { return *value_; }
+    const T& operator*() const & { return *value_; }
+    T&& operator*() && { return std::move(*value_); }
     
-    // Move assignment
-    expected& operator=(expected&& other) noexcept {
-        if (this != &other) {
-            this->~expected();
-            new(this) expected(std::move(other));
-        }
-        return *this;
-    }
-    
-    ~expected() {
-        if (has_val) {
-            storage.value.~T();
-        } else {
-            storage.error.~E();
-        }
-    }
-    
-    bool has_value() const noexcept { return has_val; }
-    explicit operator bool() const noexcept { return has_val; }
-    
-    T& operator*() & { return storage.value; }
-    const T& operator*() const & { return storage.value; }
-    T&& operator*() && { return std::move(storage.value); }
-    
-    E& error() & { return storage.error; }
-    const E& error() const & { return storage.error; }
+    E& error() & { return *error_; }
+    const E& error() const & { return *error_; }
 };
 
 template<typename E>
@@ -140,6 +90,32 @@ struct unexpected {
     E value;
     explicit unexpected(E&& e) : value(std::move(e)) {}
     explicit unexpected(const E& e) : value(e) {}
+};
+
+// For void specialization
+template<typename E>
+class expected<void, E> {
+private:
+    std::optional<E> error_;
+    
+public:
+    expected() = default;
+    explicit expected(std::in_place_t) {}
+    
+    template<typename U> requires std::convertible_to<U, E>
+    expected(U&& e) : error_(std::forward<U>(e)) {}
+    
+    expected(const expected&) = default;
+    expected(expected&&) = default;
+    expected& operator=(const expected&) = default;
+    expected& operator=(expected&&) = default;
+    ~expected() = default;
+    
+    bool has_value() const noexcept { return !error_.has_value(); }
+    explicit operator bool() const noexcept { return has_value(); }
+    
+    E& error() & { return *error_; }
+    const E& error() const & { return *error_; }
 };
 
 // Helper function to replace std::to_underlying
@@ -421,7 +397,7 @@ public:
         };
         
         using PQItem = std::pair<float, Coord>;
-        std::priority_queue<PQItem, std::vector<PQItem>, std::greater<PQItem>> pq;
+        std::priority_queue<PQItem, std::vector<PQItem>, std::greater<>> pq;
         
         cost[static_cast<size_t>(start.second)][static_cast<size_t>(start.first)] = 0.0f;
         pq.emplace(heuristic(start, end), start);
@@ -495,7 +471,7 @@ public:
             out.write(reinterpret_cast<const char*>(&tile), sizeof(ModularTile));
         }
         
-        return {};
+        return expected<void, GenerationError>{std::in_place};
     }
     
     static expected<Level, GenerationError> deserialize(std::istream& in) {
@@ -533,7 +509,7 @@ public:
             in.read(reinterpret_cast<char*>(&tile), sizeof(ModularTile));
         }
         
-        return std::move(level);
+        return Level{std::move(level)};
     }
     
     const ModularTile& at(int x, int y) const { 
