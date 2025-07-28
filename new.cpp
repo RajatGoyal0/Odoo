@@ -45,67 +45,64 @@ Space: O(n*m) for level data, O(1) for algorithms
 #include <numeric>
 #include <limits>
 #include <memory>
+#include <new>
 
-// Simple expected implementation with proper RAII
+// Compatible expected implementation for older compilers
 template<typename T, typename E>
 class expected {
 private:
-    alignas(std::max(alignof(T), alignof(E))) std::byte storage[std::max(sizeof(T), sizeof(E))];
+    union Storage {
+        T value;
+        E error;
+        Storage() {}
+        ~Storage() {}
+    };
+    
+    Storage storage;
     bool has_val;
     
-    T* value_ptr() noexcept { return std::launder(reinterpret_cast<T*>(storage)); }
-    const T* value_ptr() const noexcept { return std::launder(reinterpret_cast<const T*>(storage)); }
-    E* error_ptr() noexcept { return std::launder(reinterpret_cast<E*>(storage)); }
-    const E* error_ptr() const noexcept { return std::launder(reinterpret_cast<const E*>(storage)); }
-    
 public:
-    explicit expected(const T& v) : has_val(true) { 
-        std::construct_at(value_ptr(), v); 
+    expected(const T& v) : has_val(true) { 
+        new(&storage.value) T(v); 
     }
     
-    explicit expected(T&& v) : has_val(true) { 
-        std::construct_at(value_ptr(), std::move(v)); 
+    expected(T&& v) : has_val(true) { 
+        new(&storage.value) T(std::move(v)); 
     }
     
     template<typename... Args>
     explicit expected(std::in_place_t, Args&&... args) : has_val(true) {
-        std::construct_at(value_ptr(), std::forward<Args>(args)...);
+        new(&storage.value) T(std::forward<Args>(args)...);
     }
     
     template<typename U> requires std::convertible_to<U, E>
-    explicit expected(U&& e) : has_val(false) { 
-        std::construct_at(error_ptr(), std::forward<U>(e)); 
+    expected(U&& e) : has_val(false) { 
+        new(&storage.error) E(std::forward<U>(e)); 
     }
     
     // Copy constructor
     expected(const expected& other) : has_val(other.has_val) {
         if (has_val) {
-            std::construct_at(value_ptr(), *other.value_ptr());
+            new(&storage.value) T(other.storage.value);
         } else {
-            std::construct_at(error_ptr(), *other.error_ptr());
+            new(&storage.error) E(other.storage.error);
         }
     }
     
     // Move constructor  
     expected(expected&& other) noexcept : has_val(other.has_val) {
         if (has_val) {
-            std::construct_at(value_ptr(), std::move(*other.value_ptr()));
+            new(&storage.value) T(std::move(other.storage.value));
         } else {
-            std::construct_at(error_ptr(), std::move(*other.error_ptr()));
+            new(&storage.error) E(std::move(other.storage.error));
         }
     }
     
     // Copy assignment
     expected& operator=(const expected& other) {
         if (this != &other) {
-            if (has_val && other.has_val) {
-                *value_ptr() = *other.value_ptr();
-            } else if (!has_val && !other.has_val) {
-                *error_ptr() = *other.error_ptr();
-            } else {
-                this->~expected();
-                std::construct_at(this, other);
-            }
+            this->~expected();
+            new(this) expected(other);
         }
         return *this;
     }
@@ -113,35 +110,29 @@ public:
     // Move assignment
     expected& operator=(expected&& other) noexcept {
         if (this != &other) {
-            if (has_val && other.has_val) {
-                *value_ptr() = std::move(*other.value_ptr());
-            } else if (!has_val && !other.has_val) {
-                *error_ptr() = std::move(*other.error_ptr());
-            } else {
-                this->~expected();
-                std::construct_at(this, std::move(other));
-            }
+            this->~expected();
+            new(this) expected(std::move(other));
         }
         return *this;
     }
     
     ~expected() {
         if (has_val) {
-            std::destroy_at(value_ptr());
+            storage.value.~T();
         } else {
-            std::destroy_at(error_ptr());
+            storage.error.~E();
         }
     }
     
     bool has_value() const noexcept { return has_val; }
     explicit operator bool() const noexcept { return has_val; }
     
-    T& operator*() & { return *value_ptr(); }
-    const T& operator*() const & { return *value_ptr(); }
-    T&& operator*() && { return std::move(*value_ptr()); }
+    T& operator*() & { return storage.value; }
+    const T& operator*() const & { return storage.value; }
+    T&& operator*() && { return std::move(storage.value); }
     
-    E& error() & { return *error_ptr(); }
-    const E& error() const & { return *error_ptr(); }
+    E& error() & { return storage.error; }
+    const E& error() const & { return storage.error; }
 };
 
 template<typename E>
@@ -395,7 +386,7 @@ public:
             return unexpected(GenerationError::ConstraintsUnsatisfiable);
         }
         
-        return expected<bool, GenerationError>{std::in_place, true};
+        return true;
     }
     
     /**
@@ -430,7 +421,7 @@ public:
         };
         
         using PQItem = std::pair<float, Coord>;
-        std::priority_queue<PQItem, std::vector<PQItem>, std::greater<>> pq;
+        std::priority_queue<PQItem, std::vector<PQItem>, std::greater<PQItem>> pq;
         
         cost[static_cast<size_t>(start.second)][static_cast<size_t>(start.first)] = 0.0f;
         pq.emplace(heuristic(start, end), start);
@@ -504,7 +495,7 @@ public:
             out.write(reinterpret_cast<const char*>(&tile), sizeof(ModularTile));
         }
         
-        return expected<void, GenerationError>{std::in_place};
+        return {};
     }
     
     static expected<Level, GenerationError> deserialize(std::istream& in) {
@@ -542,7 +533,7 @@ public:
             in.read(reinterpret_cast<char*>(&tile), sizeof(ModularTile));
         }
         
-        return expected<Level, GenerationError>{std::in_place, std::move(level)};
+        return std::move(level);
     }
     
     const ModularTile& at(int x, int y) const { 
