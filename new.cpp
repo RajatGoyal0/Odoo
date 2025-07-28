@@ -44,49 +44,68 @@ Space: O(n*m) for level data, O(1) for algorithms
 #include <cmath>
 #include <numeric>
 #include <limits>
+#include <memory>
 
-// Simple expected implementation for C++20/23 compatibility
+// Simple expected implementation with proper RAII
 template<typename T, typename E>
 class expected {
-    union Storage { T val; E err; };
-    Storage storage;
+private:
+    alignas(std::max(alignof(T), alignof(E))) std::byte storage[std::max(sizeof(T), sizeof(E))];
     bool has_val;
     
+    T* value_ptr() noexcept { return std::launder(reinterpret_cast<T*>(storage)); }
+    const T* value_ptr() const noexcept { return std::launder(reinterpret_cast<const T*>(storage)); }
+    E* error_ptr() noexcept { return std::launder(reinterpret_cast<E*>(storage)); }
+    const E* error_ptr() const noexcept { return std::launder(reinterpret_cast<const E*>(storage)); }
+    
 public:
-    expected(const T& v) : has_val(true) { new(&storage.val) T(v); }
-    expected(T&& v) : has_val(true) { new(&storage.val) T(std::move(v)); }
+    explicit expected(const T& v) : has_val(true) { 
+        std::construct_at(value_ptr(), v); 
+    }
+    
+    explicit expected(T&& v) : has_val(true) { 
+        std::construct_at(value_ptr(), std::move(v)); 
+    }
     
     template<typename... Args>
     explicit expected(std::in_place_t, Args&&... args) : has_val(true) {
-        new(&storage.val) T(std::forward<Args>(args)...);
+        std::construct_at(value_ptr(), std::forward<Args>(args)...);
     }
     
     template<typename U> requires std::convertible_to<U, E>
-    expected(U&& e) : has_val(false) { new(&storage.err) E(std::forward<U>(e)); }
+    explicit expected(U&& e) : has_val(false) { 
+        std::construct_at(error_ptr(), std::forward<U>(e)); 
+    }
     
     // Copy constructor
     expected(const expected& other) : has_val(other.has_val) {
         if (has_val) {
-            new(&storage.val) T(other.storage.val);
+            std::construct_at(value_ptr(), *other.value_ptr());
         } else {
-            new(&storage.err) E(other.storage.err);
+            std::construct_at(error_ptr(), *other.error_ptr());
         }
     }
     
     // Move constructor  
     expected(expected&& other) noexcept : has_val(other.has_val) {
         if (has_val) {
-            new(&storage.val) T(std::move(other.storage.val));
+            std::construct_at(value_ptr(), std::move(*other.value_ptr()));
         } else {
-            new(&storage.err) E(std::move(other.storage.err));
+            std::construct_at(error_ptr(), std::move(*other.error_ptr()));
         }
     }
     
     // Copy assignment
     expected& operator=(const expected& other) {
         if (this != &other) {
-            this->~expected();
-            new(this) expected(other);
+            if (has_val && other.has_val) {
+                *value_ptr() = *other.value_ptr();
+            } else if (!has_val && !other.has_val) {
+                *error_ptr() = *other.error_ptr();
+            } else {
+                this->~expected();
+                std::construct_at(this, other);
+            }
         }
         return *this;
     }
@@ -94,29 +113,35 @@ public:
     // Move assignment
     expected& operator=(expected&& other) noexcept {
         if (this != &other) {
-            this->~expected();
-            new(this) expected(std::move(other));
+            if (has_val && other.has_val) {
+                *value_ptr() = std::move(*other.value_ptr());
+            } else if (!has_val && !other.has_val) {
+                *error_ptr() = std::move(*other.error_ptr());
+            } else {
+                this->~expected();
+                std::construct_at(this, std::move(other));
+            }
         }
         return *this;
     }
     
     ~expected() {
         if (has_val) {
-            storage.val.~T();
+            std::destroy_at(value_ptr());
         } else {
-            storage.err.~E();
+            std::destroy_at(error_ptr());
         }
     }
     
     bool has_value() const noexcept { return has_val; }
     explicit operator bool() const noexcept { return has_val; }
     
-    T& operator*() & { return storage.val; }
-    const T& operator*() const & { return storage.val; }
-    T&& operator*() && { return std::move(storage.val); }
+    T& operator*() & { return *value_ptr(); }
+    const T& operator*() const & { return *value_ptr(); }
+    T&& operator*() && { return std::move(*value_ptr()); }
     
-    E& error() & { return storage.err; }
-    const E& error() const & { return storage.err; }
+    E& error() & { return *error_ptr(); }
+    const E& error() const & { return *error_ptr(); }
 };
 
 template<typename E>
@@ -135,9 +160,17 @@ constexpr auto to_underlying(E e) noexcept {
 // Enhanced Perlin noise with multi-octave support
 namespace noise {
 
-constexpr float fade(float t) noexcept { return t * t * t * (t * (t * 6 - 15) + 10); }
-constexpr float lerp(float t, float a, float b) noexcept { return a + t * (b - a); }
-constexpr int fastfloor(float x) noexcept { return (x > 0) ? static_cast<int>(x) : static_cast<int>(x) - 1; }
+constexpr float fade(float t) noexcept { 
+    return t * t * t * (t * (t * 6 - 15) + 10); 
+}
+
+constexpr float lerp(float t, float a, float b) noexcept { 
+    return a + t * (b - a); 
+}
+
+constexpr int fastfloor(float x) noexcept { 
+    return (x > 0) ? static_cast<int>(x) : static_cast<int>(x) - 1; 
+}
 
 struct Perlin {
     std::array<int, 512> p;
@@ -146,7 +179,9 @@ struct Perlin {
         std::mt19937 rng(seed);
         std::iota(p.begin(), p.begin() + 256, 0);
         std::shuffle(p.begin(), p.begin() + 256, rng);
-        for (int i = 0; i < 256; ++i) p[256 + i] = p[i];
+        for (int i = 0; i < 256; ++i) {
+            p[256 + i] = p[i];
+        }
     }
     
     constexpr float grad(int hash, float x, float y) const noexcept {
@@ -202,8 +237,13 @@ enum class TerrainType : std::uint8_t {
     Water, Plain, Forest, Mountain, Path, POI, Start
 };
 
-enum class TileVariant : std::uint8_t { A, B, C, D };
-enum class TileRotation : std::uint8_t { Deg0, Deg90, Deg180, Deg270 };
+enum class TileVariant : std::uint8_t { 
+    A, B, C, D 
+};
+
+enum class TileRotation : std::uint8_t { 
+    Deg0, Deg90, Deg180, Deg270 
+};
 
 struct ModularTile {
     TerrainType baseType{TerrainType::Plain};
@@ -253,7 +293,9 @@ struct LevelConstraints {
         const int walkableCount = static_cast<int>(std::ranges::count_if(level.grid, 
             [](const auto& tile) { return tile.walkable; }));
         const float walkableRatio = static_cast<float>(walkableCount) / static_cast<float>(level.grid.size());
-        if (walkableRatio < minWalkableRatio) return false;
+        if (walkableRatio < minWalkableRatio) {
+            return false;
+        }
         
         // Check POI distances
         for (size_t i = 0; i < level.pois.size(); ++i) {
@@ -261,7 +303,9 @@ struct LevelConstraints {
                 const auto [x1, y1] = level.pois[i];
                 const auto [x2, y2] = level.pois[j];
                 const int dist = std::abs(x1 - x2) + std::abs(y1 - y2);
-                if (dist < minPOIDistance || dist > maxPOIDistance) return false;
+                if (dist < minPOIDistance || dist > maxPOIDistance) {
+                    return false;
+                }
             }
         }
         
@@ -279,9 +323,10 @@ class Level {
 public:
     static constexpr std::uint32_t FORMAT_VERSION = 2;
     
-    Level(int w, int h) : width(w), height(h), grid(static_cast<size_t>(w) * static_cast<size_t>(h)) {}
+    explicit Level(int w, int h) : width(w), height(h), grid(static_cast<size_t>(w) * static_cast<size_t>(h)) {}
     
-    int width, height;
+    int width;
+    int height;
     std::vector<ModularTile> grid;
     std::vector<Coord> pois;
     Coord playerStart{0, 0};
@@ -350,7 +395,7 @@ public:
             return unexpected(GenerationError::ConstraintsUnsatisfiable);
         }
         
-        return true;
+        return expected<bool, GenerationError>{std::in_place, true};
     }
     
     /**
@@ -409,12 +454,16 @@ public:
                 const int nx = current.first + dx;
                 const int ny = current.second + dy;
                 
-                if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+                if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+                    continue;
+                }
                 
                 const auto& currentTile = at(current.first, current.second);
                 const auto& nextTile = at(nx, ny);
                 
-                if (!nextTile.walkable || !currentTile.canConnect(nextTile, dir)) continue;
+                if (!nextTile.walkable || !currentTile.canConnect(nextTile, dir)) {
+                    continue;
+                }
                 
                 const float newCost = cost[static_cast<size_t>(current.second)][static_cast<size_t>(current.first)] + getTerrainCost(nextTile.baseType);
                 
@@ -455,7 +504,7 @@ public:
             out.write(reinterpret_cast<const char*>(&tile), sizeof(ModularTile));
         }
         
-        return {};
+        return expected<void, GenerationError>{std::in_place};
     }
     
     static expected<Level, GenerationError> deserialize(std::istream& in) {
@@ -468,7 +517,8 @@ public:
             return unexpected(GenerationError::SerializationFailed);
         }
         
-        int w, h;
+        int w;
+        int h;
         LevelConstraints constraints;
         Coord playerStart;
         
@@ -492,12 +542,13 @@ public:
             in.read(reinterpret_cast<char*>(&tile), sizeof(ModularTile));
         }
         
-        return level;
+        return expected<Level, GenerationError>{std::in_place, std::move(level)};
     }
     
     const ModularTile& at(int x, int y) const { 
         return grid[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)]; 
     }
+    
     ModularTile& at(int x, int y) { 
         return grid[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)]; 
     }
@@ -530,7 +581,9 @@ private:
             const int y = distY(rng);
             const Coord candidate{x, y};
             
-            if (candidate == playerStart || !at(x, y).walkable) continue;
+            if (candidate == playerStart || !at(x, y).walkable) {
+                continue;
+            }
             
             const bool validDistance = std::ranges::all_of(pois, [&](const Coord& poi) {
                 const int dist = std::abs(x - poi.first) + std::abs(y - poi.second);
@@ -550,7 +603,9 @@ private:
     bool ensureConnectivity() {
         for (const auto& poi : pois) {
             const auto path = findPath(playerStart, poi);
-            if (!path) return false;
+            if (!path) {
+                return false;
+            }
             
             for (const auto& [x, y] : *path) {
                 auto& tile = at(x, y);
@@ -586,9 +641,18 @@ private:
     Coord hoveredCell{-1, -1};
     
 public:
+    LevelDebugger() = default;
     ~LevelDebugger() {
         cleanup();
     }
+    
+    // Delete copy operations
+    LevelDebugger(const LevelDebugger&) = delete;
+    LevelDebugger& operator=(const LevelDebugger&) = delete;
+    
+    // Delete move operations for simplicity
+    LevelDebugger(LevelDebugger&&) = delete;
+    LevelDebugger& operator=(LevelDebugger&&) = delete;
     
     void preview(const Level& level) {
         if (initialize(level)) {
@@ -599,7 +663,9 @@ public:
     
 private:
     bool initialize(const Level& level) {
-        if (SDL_Init(SDL_INIT_VIDEO) < 0) return false;
+        if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+            return false;
+        }
         
         const int windowWidth = level.width * CELL_SIZE + 2 * MARGIN + INFO_PANEL_WIDTH;
         const int windowHeight = level.height * CELL_SIZE + 2 * MARGIN;
@@ -608,7 +674,9 @@ private:
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
             windowWidth, windowHeight, SDL_WINDOW_SHOWN);
         
-        if (!window) return false;
+        if (!window) {
+            return false;
+        }
         
         renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
         return renderer != nullptr;
@@ -653,11 +721,20 @@ private:
             }
         } else if (event.type == SDL_KEYDOWN) {
             switch (event.key.keysym.sym) {
-                case SDLK_e: showElevation = !showElevation; break;
-                case SDLK_c: showConnections = !showConnections; break;
-                case SDLK_v: showVariants = !showVariants; break;
-                case SDLK_ESCAPE: selectedCell = {-1, -1}; break;
-                default: break;
+                case SDLK_e: 
+                    showElevation = !showElevation; 
+                    break;
+                case SDLK_c: 
+                    showConnections = !showConnections; 
+                    break;
+                case SDLK_v: 
+                    showVariants = !showVariants; 
+                    break;
+                case SDLK_ESCAPE: 
+                    selectedCell = {-1, -1}; 
+                    break;
+                default: 
+                    break;
             }
         }
     }
@@ -742,14 +819,18 @@ private:
         const int centerX = rect.x + rect.w / 2;
         const int centerY = rect.y + rect.h / 2;
         
-        if (tile.connections[0]) 
+        if (tile.connections[0]) {
             SDL_RenderDrawLine(renderer, centerX, centerY, centerX, rect.y);
-        if (tile.connections[1]) 
+        }
+        if (tile.connections[1]) {
             SDL_RenderDrawLine(renderer, centerX, centerY, rect.x + rect.w, centerY);
-        if (tile.connections[2]) 
+        }
+        if (tile.connections[2]) {
             SDL_RenderDrawLine(renderer, centerX, centerY, centerX, rect.y + rect.h);
-        if (tile.connections[3]) 
+        }
+        if (tile.connections[3]) {
             SDL_RenderDrawLine(renderer, centerX, centerY, rect.x, centerY);
+        }
     }
     
     static SDL_Color getTileColor(const ModularTile& tile, bool showElevation, bool showVariants) {
@@ -760,14 +841,30 @@ private:
         
         SDL_Color baseColor;
         switch (tile.baseType) {
-            case TerrainType::Water: baseColor = {30, 80, 180, 255}; break;
-            case TerrainType::Plain: baseColor = {90, 210, 80, 255}; break;
-            case TerrainType::Forest: baseColor = {15, 110, 40, 255}; break;
-            case TerrainType::Mountain: baseColor = {120, 115, 130, 255}; break;
-            case TerrainType::Path: baseColor = {255, 230, 60, 255}; break;
-            case TerrainType::POI: baseColor = {220, 30, 30, 255}; break;
-            case TerrainType::Start: baseColor = {230, 250, 90, 255}; break;
-            default: baseColor = {255, 255, 255, 255}; break;
+            case TerrainType::Water: 
+                baseColor = {30, 80, 180, 255}; 
+                break;
+            case TerrainType::Plain: 
+                baseColor = {90, 210, 80, 255}; 
+                break;
+            case TerrainType::Forest: 
+                baseColor = {15, 110, 40, 255}; 
+                break;
+            case TerrainType::Mountain: 
+                baseColor = {120, 115, 130, 255}; 
+                break;
+            case TerrainType::Path: 
+                baseColor = {255, 230, 60, 255}; 
+                break;
+            case TerrainType::POI: 
+                baseColor = {220, 30, 30, 255}; 
+                break;
+            case TerrainType::Start: 
+                baseColor = {230, 250, 90, 255}; 
+                break;
+            default: 
+                baseColor = {255, 255, 255, 255}; 
+                break;
         }
         
         if (showVariants) {
@@ -781,8 +878,14 @@ private:
     }
     
     void cleanup() {
-        if (renderer) SDL_DestroyRenderer(renderer);
-        if (window) SDL_DestroyWindow(window);
+        if (renderer) {
+            SDL_DestroyRenderer(renderer);
+            renderer = nullptr;
+        }
+        if (window) {
+            SDL_DestroyWindow(window);
+            window = nullptr;
+        }
         SDL_Quit();
     }
 };
