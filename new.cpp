@@ -17,6 +17,13 @@ Time: O(octaves * n*m) for generation, O(path_len*log|open|) for pathfinding
 Space: O(n*m) for level data, O(1) for algorithms
 */
 
+// SDL2 headers first to avoid order issues
+#ifdef _WIN32
+#define SDL_MAIN_HANDLED
+#pragma comment(lib, "SDL2.lib")
+#endif
+#include <SDL2/SDL.h>
+
 #include <array>
 #include <span>
 #include <vector>
@@ -36,51 +43,94 @@ Space: O(n*m) for level data, O(1) for algorithms
 #include <functional>
 #include <cmath>
 #include <numeric>
+#include <limits>
 
-// For C++23 std::expected - fallback for older compilers
-#if __cpp_lib_expected >= 202202L
-    #include <expected>
-#else
-    // Simple expected implementation for compatibility
-    template<typename T, typename E>
-    class expected {
-        union { T val; E err; };
-        bool has_val;
-    public:
-        expected(T&& v) : val(std::move(v)), has_val(true) {}
-        expected(const T& v) : val(v), has_val(true) {}
-        
-        template<typename U>
-        expected(U&& e) requires std::convertible_to<U, E> : err(std::forward<U>(e)), has_val(false) {}
-        
-        ~expected() {
-            if (has_val) val.~T();
-            else err.~E();
-        }
-        
-        bool has_value() const noexcept { return has_val; }
-        explicit operator bool() const noexcept { return has_val; }
-        
-        T& operator*() & { return val; }
-        const T& operator*() const & { return val; }
-        T&& operator*() && { return std::move(val); }
-        
-        E& error() & { return err; }
-        const E& error() const & { return err; }
-    };
+// Simple expected implementation for C++20/23 compatibility
+template<typename T, typename E>
+class expected {
+    union Storage { T val; E err; };
+    Storage storage;
+    bool has_val;
     
-    template<typename E>
-    struct unexpected {
-        E value;
-        explicit unexpected(E&& e) : value(std::move(e)) {}
-        explicit unexpected(const E& e) : value(e) {}
-    };
+public:
+    expected(const T& v) : has_val(true) { new(&storage.val) T(v); }
+    expected(T&& v) : has_val(true) { new(&storage.val) T(std::move(v)); }
     
-    namespace std {
-        using ::expected;
-        using ::unexpected;
+    template<typename... Args>
+    explicit expected(std::in_place_t, Args&&... args) : has_val(true) {
+        new(&storage.val) T(std::forward<Args>(args)...);
     }
-#endif
+    
+    template<typename U> requires std::convertible_to<U, E>
+    expected(U&& e) : has_val(false) { new(&storage.err) E(std::forward<U>(e)); }
+    
+    // Copy constructor
+    expected(const expected& other) : has_val(other.has_val) {
+        if (has_val) {
+            new(&storage.val) T(other.storage.val);
+        } else {
+            new(&storage.err) E(other.storage.err);
+        }
+    }
+    
+    // Move constructor  
+    expected(expected&& other) noexcept : has_val(other.has_val) {
+        if (has_val) {
+            new(&storage.val) T(std::move(other.storage.val));
+        } else {
+            new(&storage.err) E(std::move(other.storage.err));
+        }
+    }
+    
+    // Copy assignment
+    expected& operator=(const expected& other) {
+        if (this != &other) {
+            this->~expected();
+            new(this) expected(other);
+        }
+        return *this;
+    }
+    
+    // Move assignment
+    expected& operator=(expected&& other) noexcept {
+        if (this != &other) {
+            this->~expected();
+            new(this) expected(std::move(other));
+        }
+        return *this;
+    }
+    
+    ~expected() {
+        if (has_val) {
+            storage.val.~T();
+        } else {
+            storage.err.~E();
+        }
+    }
+    
+    bool has_value() const noexcept { return has_val; }
+    explicit operator bool() const noexcept { return has_val; }
+    
+    T& operator*() & { return storage.val; }
+    const T& operator*() const & { return storage.val; }
+    T&& operator*() && { return std::move(storage.val); }
+    
+    E& error() & { return storage.err; }
+    const E& error() const & { return storage.err; }
+};
+
+template<typename E>
+struct unexpected {
+    E value;
+    explicit unexpected(E&& e) : value(std::move(e)) {}
+    explicit unexpected(const E& e) : value(e) {}
+};
+
+// Helper function to replace std::to_underlying
+template<typename E> requires std::is_enum_v<E>
+constexpr auto to_underlying(E e) noexcept {
+    return static_cast<std::underlying_type_t<E>>(e);
+}
 
 // Enhanced Perlin noise with multi-octave support
 namespace noise {
@@ -92,7 +142,7 @@ constexpr int fastfloor(float x) noexcept { return (x > 0) ? static_cast<int>(x)
 struct Perlin {
     std::array<int, 512> p;
     
-    explicit Perlin(uint32_t seed = 0) {
+    explicit Perlin(std::uint32_t seed = 0) {
         std::mt19937 rng(seed);
         std::iota(p.begin(), p.begin() + 256, 0);
         std::shuffle(p.begin(), p.begin() + 256, rng);
@@ -170,6 +220,15 @@ struct ModularTile {
     bool operator==(const ModularTile&) const = default;
 };
 
+// Error handling for generation
+enum class GenerationError {
+    InvalidSeed,
+    ConstraintsUnsatisfiable,
+    PathfindingFailed,
+    InsufficientWalkableArea,
+    SerializationFailed
+};
+
 // Enhanced constraint system
 struct LevelConstraints {
     float maxElevation{1.0f};
@@ -210,15 +269,6 @@ struct LevelConstraints {
     }
 };
 
-// Error handling for generation
-enum class GenerationError {
-    InvalidSeed,
-    ConstraintsUnsatisfiable,
-    PathfindingFailed,
-    InsufficientWalkableArea,
-    SerializationFailed
-};
-
 /**
  * @tagline Enhanced Level class with modular tiles and comprehensive error handling
  * @intuition Use modern C++23 features for robust, maintainable level generation
@@ -243,7 +293,7 @@ public:
      * @approach Try generation with backoff, returning specific error codes
      * @complexity Time: O(attempts * generation_time), Space: O(n*m)
      */
-    std::expected<bool, GenerationError> generate(std::uint32_t seed = 42, int numPOI = 5) {
+    expected<bool, GenerationError> generate(std::uint32_t seed = 42, int numPOI = 5) {
         noise::Perlin perlin(seed);
         std::mt19937 rng(seed);
         
@@ -280,24 +330,24 @@ public:
         
         // 2. Place player start
         if (!placePlayerStart(rng)) {
-            return std::unexpected(GenerationError::InsufficientWalkableArea);
+            return unexpected(GenerationError::InsufficientWalkableArea);
         }
         
         // 3. Place POIs with distance constraints
         if (!placePOIs(rng, numPOI)) {
-            return std::unexpected(GenerationError::ConstraintsUnsatisfiable);
+            return unexpected(GenerationError::ConstraintsUnsatisfiable);
         }
         
         // 4. Ensure connectivity
         if (constraints.requireAllPOIsConnected) {
             if (!ensureConnectivity()) {
-                return std::unexpected(GenerationError::PathfindingFailed);
+                return unexpected(GenerationError::PathfindingFailed);
             }
         }
         
         // 5. Validate constraints
         if (!constraints.validate(*this)) {
-            return std::unexpected(GenerationError::ConstraintsUnsatisfiable);
+            return unexpected(GenerationError::ConstraintsUnsatisfiable);
         }
         
         return true;
@@ -326,6 +376,10 @@ public:
                 case TerrainType::Plain: return 1.0f;
                 case TerrainType::Forest: return 1.5f;
                 case TerrainType::Path: return 0.8f;
+                case TerrainType::Water: return 10.0f;
+                case TerrainType::Mountain: return 10.0f;
+                case TerrainType::POI: return 1.0f;
+                case TerrainType::Start: return 1.0f;
                 default: return 10.0f;
             }
         };
@@ -381,25 +435,22 @@ public:
      * @approach Binary format with header validation and backwards compatibility
      * @complexity Time: O(n*m), Space: O(1)
      */
-    std::expected<void, GenerationError> serialize(std::ostream& out) const {
+    expected<void, GenerationError> serialize(std::ostream& out) const {
         if (!out.write(reinterpret_cast<const char*>(&FORMAT_VERSION), sizeof(FORMAT_VERSION))) {
-            return std::unexpected(GenerationError::SerializationFailed);
+            return unexpected(GenerationError::SerializationFailed);
         }
         
-        // Write dimensions and constraints
         out.write(reinterpret_cast<const char*>(&width), sizeof(width));
         out.write(reinterpret_cast<const char*>(&height), sizeof(height));
         out.write(reinterpret_cast<const char*>(&constraints), sizeof(constraints));
         out.write(reinterpret_cast<const char*>(&playerStart), sizeof(playerStart));
         
-        // Write POIs
         const auto poiCount = static_cast<std::uint32_t>(pois.size());
         out.write(reinterpret_cast<const char*>(&poiCount), sizeof(poiCount));
         if (poiCount > 0) {
             out.write(reinterpret_cast<const char*>(pois.data()), sizeof(Coord) * poiCount);
         }
         
-        // Write grid
         for (const auto& tile : grid) {
             out.write(reinterpret_cast<const char*>(&tile), sizeof(ModularTile));
         }
@@ -407,14 +458,14 @@ public:
         return {};
     }
     
-    static std::expected<Level, GenerationError> deserialize(std::istream& in) {
+    static expected<Level, GenerationError> deserialize(std::istream& in) {
         std::uint32_t version;
         if (!in.read(reinterpret_cast<char*>(&version), sizeof(version))) {
-            return std::unexpected(GenerationError::SerializationFailed);
+            return unexpected(GenerationError::SerializationFailed);
         }
         
         if (version > FORMAT_VERSION) {
-            return std::unexpected(GenerationError::SerializationFailed);
+            return unexpected(GenerationError::SerializationFailed);
         }
         
         int w, h;
@@ -501,7 +552,6 @@ private:
             const auto path = findPath(playerStart, poi);
             if (!path) return false;
             
-            // Mark path tiles
             for (const auto& [x, y] : *path) {
                 auto& tile = at(x, y);
                 if (tile.walkable && tile.baseType != TerrainType::POI && tile.baseType != TerrainType::Start) {
@@ -512,15 +562,6 @@ private:
         return true;
     }
 };
-
-// Enhanced interactive debug visualizer
-#ifdef _WIN32
-#define SDL_MAIN_HANDLED
-#pragma comment(lib, "SDL2.lib")
-#endif
-
-// SDL2 headers - move to top to avoid header order issues
-#include <SDL2/SDL.h>
 
 namespace vis {
 
@@ -587,7 +628,7 @@ private:
             }
             
             render(level);
-            SDL_Delay(16); // ~60 FPS
+            SDL_Delay(16);
         }
     }
     
@@ -647,12 +688,10 @@ private:
                 SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
                 SDL_RenderFillRect(renderer, &rect);
                 
-                // Draw connections if enabled
                 if (showConnections) {
                     drawTileConnections(tile, rect);
                 }
                 
-                // Highlight selected/hovered cells
                 if (Coord{x, y} == selectedCell) {
                     SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
                     SDL_RenderDrawRect(renderer, &rect);
@@ -665,7 +704,6 @@ private:
     }
     
     void drawOverlays(const Level& level) {
-        // Draw paths between POIs
         SDL_SetRenderDrawColor(renderer, 255, 255, 0, 200);
         for (const auto& poi : level.pois) {
             if (const auto path = level.findPath(level.playerStart, poi)) {
@@ -686,16 +724,12 @@ private:
         const int panelX = MARGIN + level.width * CELL_SIZE + 20;
         const int panelY = MARGIN;
         
-        // Draw panel background
         const SDL_Rect panelRect{panelX, panelY, INFO_PANEL_WIDTH - 20, level.height * CELL_SIZE};
         SDL_SetRenderDrawColor(renderer, 40, 40, 40, 200);
         SDL_RenderFillRect(renderer, &panelRect);
         
-        // Display selected cell info (would need text rendering library for full implementation)
         if (selectedCell.first >= 0) {
             const auto& tile = level.at(selectedCell.first, selectedCell.second);
-            
-            // Draw color swatch for selected tile
             const SDL_Rect swatch{panelX + 10, panelY + 10, 20, 20};
             const SDL_Color color = getTileColor(tile, false, false);
             SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
@@ -708,14 +742,13 @@ private:
         const int centerX = rect.x + rect.w / 2;
         const int centerY = rect.y + rect.h / 2;
         
-        // Draw connection indicators
-        if (tile.connections[0]) // North
+        if (tile.connections[0]) 
             SDL_RenderDrawLine(renderer, centerX, centerY, centerX, rect.y);
-        if (tile.connections[1]) // East
+        if (tile.connections[1]) 
             SDL_RenderDrawLine(renderer, centerX, centerY, rect.x + rect.w, centerY);
-        if (tile.connections[2]) // South
+        if (tile.connections[2]) 
             SDL_RenderDrawLine(renderer, centerX, centerY, centerX, rect.y + rect.h);
-        if (tile.connections[3]) // West
+        if (tile.connections[3]) 
             SDL_RenderDrawLine(renderer, centerX, centerY, rect.x, centerY);
     }
     
@@ -738,8 +771,7 @@ private:
         }
         
         if (showVariants) {
-            // Slightly modify color based on variant
-            const int variantOffset = static_cast<int>(tile.variant) * 10 - 15;
+            const int variantOffset = to_underlying(tile.variant) * 10 - 15;
             baseColor.r = static_cast<std::uint8_t>(std::clamp(static_cast<int>(baseColor.r) + variantOffset, 0, 255));
             baseColor.g = static_cast<std::uint8_t>(std::clamp(static_cast<int>(baseColor.g) + variantOffset, 0, 255));
             baseColor.b = static_cast<std::uint8_t>(std::clamp(static_cast<int>(baseColor.b) + variantOffset, 0, 255));
@@ -773,7 +805,6 @@ int main() {
     constexpr int height = 96;
     constexpr int numPOI = 8;
     
-    // Test level generation with different seeds
     const std::vector<std::uint32_t> testSeeds{42, 12345, 99999, 
         static_cast<std::uint32_t>(std::chrono::system_clock::now().time_since_epoch().count())};
     
@@ -783,21 +814,19 @@ int main() {
     for (const auto seed : testSeeds) {
         Level level(width, height);
         
-        // Customize constraints for more diverse terrain
         level.constraints.noiseOctaves = 5;
         level.constraints.minWalkableRatio = 0.65f;
         level.constraints.minPOIDistance = 12;
         level.constraints.maxPOIDistance = 35;
         
-        const auto result = level.generate(seed, numPOI);
-        if (result) {
+        if (const auto result = level.generate(seed, numPOI); result.has_value()) {
             std::cout << "✓ Level generated successfully with seed " << seed << std::endl;
             bestLevel = std::move(level);
             generationSucceeded = true;
             break;
         } else {
             std::cout << "✗ Generation failed with seed " << seed 
-                     << " (Error: " << static_cast<int>(result.error()) << ")" << std::endl;
+                     << " (Error: " << to_underlying(result.error()) << ")" << std::endl;
         }
     }
     
@@ -806,21 +835,16 @@ int main() {
         return 1;
     }
     
-    // Test serialization round-trip
+    // Test serialization
     {
         std::ofstream ofs("level_test.save", std::ios::binary);
-        const auto saveResult = bestLevel.serialize(ofs);
-        ofs.close();
-        
-        if (saveResult) {
-            std::ifstream ifs("level_test.save", std::ios::binary);
-            const auto loadResult = Level::deserialize(ifs);
-            ifs.close();
+        if (const auto saveResult = bestLevel.serialize(ofs); saveResult.has_value()) {
+            ofs.close();
             
-            if (loadResult) {
+            std::ifstream ifs("level_test.save", std::ios::binary);
+            if (const auto loadResult = Level::deserialize(ifs); loadResult.has_value()) {
                 std::cout << "✓ Serialization round-trip successful" << std::endl;
                 
-                // Verify data integrity
                 const auto& loaded = *loadResult;
                 const bool dataIntegrityOk = (loaded.width == bestLevel.width && 
                                              loaded.height == bestLevel.height &&
@@ -833,6 +857,7 @@ int main() {
             } else {
                 std::cout << "✗ Deserialization failed" << std::endl;
             }
+            ifs.close();
         } else {
             std::cout << "✗ Serialization failed" << std::endl;
         }
@@ -845,8 +870,9 @@ int main() {
     
     for (int i = 0; i < pathfindingTests; ++i) {
         if (bestLevel.pois.size() >= 2) {
-            const auto path = bestLevel.findPath(bestLevel.pois[0], bestLevel.pois[1]);
-            if (path) ++successfulPaths;
+            if (const auto path = bestLevel.findPath(bestLevel.pois[0], bestLevel.pois[1]); path.has_value()) {
+                ++successfulPaths;
+            }
         }
     }
     
@@ -856,7 +882,6 @@ int main() {
     std::cout << "Performance: " << pathfindingTests << " pathfinding tests in " 
               << duration.count() << "μs (" << successfulPaths << " successful)" << std::endl;
     
-    // Launch interactive preview
     std::cout << "\nLaunching interactive preview..." << std::endl;
     std::cout << "Controls: E=elevation, C=connections, V=variants, ESC=deselect, mouse=select" << std::endl;
     
