@@ -1,14 +1,14 @@
 /*
-@tagline: Production-ready C++23 procedural terrain generator with optimal init-statement variable scoping and complete modern language compliance.
+@tagline: Production-ready C++23 procedural terrain generator with properly structured init-statement conditional logic.
 
 @intuition
-Use C++23 init-statements for optimal variable scoping by declaring variables directly in if conditions where they're used, ensuring minimal scope and better code organization.
+Use init-statement in if condition to declare walkableRatio directly while ensuring all logic executes conditionally as intended.
 
 @approach
-- Apply init-statement syntax for walkableRatio declaration within if condition
-- Maintain all safety features while demonstrating modern C++23 scoping patterns
-- Ensure variables are declared in their minimal required scope
-- Keep all performance optimizations and safety enhancements
+- Structure the if-statement with proper init-statement syntax
+- Ensure conditional execution of all related logic
+- Maintain optimal variable scoping and modern C++23 features
+- Prevent any "statement will not be executed conditionally" warnings
 
 @complexity
 Time: O(octaves * n*m) for generation, O(path_len*log|open|) for pathfinding
@@ -316,19 +316,19 @@ struct LevelConstraints {
     bool requireAllPOIsConnected{true};
     
     /**
-     * @tagline Comprehensive constraint validation with optimal C++23 init-statement scoping
-     * @intuition Use init-statements to declare variables directly in conditions for minimal scope
-     * @approach Apply modern C++23 init-statement syntax for walkableRatio declaration
+     * @tagline Comprehensive constraint validation with proper init-statement conditional logic
+     * @intuition Use init-statement in if condition to declare walkableRatio while ensuring conditional execution
+     * @approach Structure if-statement with proper init-statement syntax for optimal variable scoping
      * @complexity Time: O(n*m + pois²), Space: O(1)
      */
     template<typename Level>
     bool validate(const Level& level) const {
         using enum TerrainType;
         
-        // Use init-statement to declare walkableRatio directly in the if condition
-        if (const auto walkableCount = static_cast<int>(std::ranges::count_if(level.grid, 
-            [](const auto& tile) { return tile.walkable; }));
-            const auto walkableRatio = static_cast<float>(walkableCount) / static_cast<float>(level.grid.size());
+        // Use init-statement to declare walkableRatio inside the if statement
+        if (const auto walkableRatio = static_cast<float>(
+                std::ranges::count_if(level.grid, [](const auto& tile) { return tile.walkable; })
+            ) / static_cast<float>(level.grid.size()); 
             walkableRatio < minWalkableRatio) {
             return false;
         }
@@ -350,9 +350,9 @@ struct LevelConstraints {
 };
 
 /**
- * @tagline Enhanced Level class with optimal C++23 scoping and complete safety features
- * @intuition Demonstrate modern C++23 patterns with proper variable scoping and safety
- * @approach Use init-statements and modern scoping while maintaining all performance features
+ * @tagline Enhanced Level class with proper init-statement usage and complete safety
+ * @intuition Use modern C++23 init-statement patterns while maintaining all safety features
+ * @approach Proper conditional structure with init-statements for optimal variable scoping
  * @complexity Time: O(n*m) for basic operations, Space: O(n*m) for storage
  */
 class Level {
@@ -369,9 +369,9 @@ public:
     LevelConstraints constraints;
     
     /**
-     * @tagline Robust level generation with modern C++23 scoping patterns
-     * @intuition Use modern C++23 features with optimal variable scoping throughout
-     * @approach Enhanced error handling and terrain generation with clean scoping
+     * @tagline Robust level generation with clean conditional logic
+     * @intuition Use modern C++23 features with properly structured control flow
+     * @approach Enhanced error handling and terrain generation with clear logic structure
      * @complexity Time: O(attempts * generation_time), Space: O(n*m)
      */
     expected<bool, GenerationError> generate(std::uint32_t seed = 42, int numPOI = 5) {
@@ -686,9 +686,9 @@ constexpr int MARGIN = 40;
 constexpr int INFO_PANEL_WIDTH = 200;
 
 /**
- * @tagline Interactive level preview with optimal C++23 scoping and modern patterns
- * @intuition Use cleanest possible C++23 patterns for visualization with optimal variable scoping
- * @approach Enhanced SDL2 integration with modern scoping patterns and clean code practices
+ * @tagline Interactive level preview with clean C++23 implementation
+ * @intuition Use cleanest possible C++23 patterns for visualization with optimal scoping
+ * @approach Enhanced SDL2 integration with modern patterns and clean code practices
  * @complexity Time: O(visible_cells), Space: O(1)
  */
 class LevelDebugger {
@@ -958,9 +958,9 @@ void previewLevel(const Level& level) {
 } // namespace vis
 
 /**
- * @tagline Production-ready main with optimal C++23 scoping and modern language features
- * @intuition Demonstrate perfect C++23 patterns with optimal variable scoping throughout
- * @approach Enhanced main function with modern scoping patterns and complete feature demonstration
+ * @tagline Production-ready main with proper init-statement usage and optimal practices
+ * @intuition Demonstrate cleanest possible C++23 patterns with proper conditional structure
+ * @approach Enhanced main function with modern safety features and perfect logic flow
  * @complexity Time: O(generations * level_complexity), Space: O(level_size)
  */
 int main() {
