@@ -45,44 +45,103 @@ Space: O(n*m) for level data, O(1) for algorithms
 #include <numeric>
 #include <limits>
 #include <memory>
-#include <new>
-#include <type_traits>
 
-// Simplified expected implementation using optional-like approach
+// Simple expected implementation with proper RAII
 template<typename T, typename E>
 class expected {
 private:
-    std::optional<T> value_;
-    std::optional<E> error_;
+    alignas(std::max(alignof(T), alignof(E))) std::byte storage[std::max(sizeof(T), sizeof(E))];
+    bool has_val;
+    
+    T* value_ptr() noexcept { return std::launder(reinterpret_cast<T*>(storage)); }
+    const T* value_ptr() const noexcept { return std::launder(reinterpret_cast<const T*>(storage)); }
+    E* error_ptr() noexcept { return std::launder(reinterpret_cast<E*>(storage)); }
+    const E* error_ptr() const noexcept { return std::launder(reinterpret_cast<const E*>(storage)); }
     
 public:
-    // Value constructors
-    expected(const T& v) : value_(v) {}
-    expected(T&& v) : value_(std::move(v)) {}
+    explicit expected(const T& v) : has_val(true) { 
+        std::construct_at(value_ptr(), v); 
+    }
+    
+    explicit expected(T&& v) : has_val(true) { 
+        std::construct_at(value_ptr(), std::move(v)); 
+    }
     
     template<typename... Args>
-    explicit expected(std::in_place_t, Args&&... args) : value_(std::in_place, std::forward<Args>(args)...) {}
+    explicit expected(std::in_place_t, Args&&... args) : has_val(true) {
+        std::construct_at(value_ptr(), std::forward<Args>(args)...);
+    }
     
-    // Error constructor
     template<typename U> requires std::convertible_to<U, E>
-    expected(U&& e) : error_(std::forward<U>(e)) {}
+    explicit expected(U&& e) : has_val(false) { 
+        std::construct_at(error_ptr(), std::forward<U>(e)); 
+    }
     
-    // Copy and move constructors
-    expected(const expected&) = default;
-    expected(expected&&) = default;
-    expected& operator=(const expected&) = default;
-    expected& operator=(expected&&) = default;
-    ~expected() = default;
+    // Copy constructor
+    expected(const expected& other) : has_val(other.has_val) {
+        if (has_val) {
+            std::construct_at(value_ptr(), *other.value_ptr());
+        } else {
+            std::construct_at(error_ptr(), *other.error_ptr());
+        }
+    }
     
-    bool has_value() const noexcept { return value_.has_value(); }
-    explicit operator bool() const noexcept { return has_value(); }
+    // Move constructor  
+    expected(expected&& other) noexcept : has_val(other.has_val) {
+        if (has_val) {
+            std::construct_at(value_ptr(), std::move(*other.value_ptr()));
+        } else {
+            std::construct_at(error_ptr(), std::move(*other.error_ptr()));
+        }
+    }
     
-    T& operator*() & { return *value_; }
-    const T& operator*() const & { return *value_; }
-    T&& operator*() && { return std::move(*value_); }
+    // Copy assignment
+    expected& operator=(const expected& other) {
+        if (this != &other) {
+            if (has_val && other.has_val) {
+                *value_ptr() = *other.value_ptr();
+            } else if (!has_val && !other.has_val) {
+                *error_ptr() = *other.error_ptr();
+            } else {
+                this->~expected();
+                std::construct_at(this, other);
+            }
+        }
+        return *this;
+    }
     
-    E& error() & { return *error_; }
-    const E& error() const & { return *error_; }
+    // Move assignment
+    expected& operator=(expected&& other) noexcept {
+        if (this != &other) {
+            if (has_val && other.has_val) {
+                *value_ptr() = std::move(*other.value_ptr());
+            } else if (!has_val && !other.has_val) {
+                *error_ptr() = std::move(*other.error_ptr());
+            } else {
+                this->~expected();
+                std::construct_at(this, std::move(other));
+            }
+        }
+        return *this;
+    }
+    
+    ~expected() {
+        if (has_val) {
+            std::destroy_at(value_ptr());
+        } else {
+            std::destroy_at(error_ptr());
+        }
+    }
+    
+    bool has_value() const noexcept { return has_val; }
+    explicit operator bool() const noexcept { return has_val; }
+    
+    T& operator*() & { return *value_ptr(); }
+    const T& operator*() const & { return *value_ptr(); }
+    T&& operator*() && { return std::move(*value_ptr()); }
+    
+    E& error() & { return *error_ptr(); }
+    const E& error() const & { return *error_ptr(); }
 };
 
 template<typename E>
@@ -90,32 +149,6 @@ struct unexpected {
     E value;
     explicit unexpected(E&& e) : value(std::move(e)) {}
     explicit unexpected(const E& e) : value(e) {}
-};
-
-// For void specialization
-template<typename E>
-class expected<void, E> {
-private:
-    std::optional<E> error_;
-    
-public:
-    expected() = default;
-    explicit expected(std::in_place_t) {}
-    
-    template<typename U> requires std::convertible_to<U, E>
-    expected(U&& e) : error_(std::forward<U>(e)) {}
-    
-    expected(const expected&) = default;
-    expected(expected&&) = default;
-    expected& operator=(const expected&) = default;
-    expected& operator=(expected&&) = default;
-    ~expected() = default;
-    
-    bool has_value() const noexcept { return !error_.has_value(); }
-    explicit operator bool() const noexcept { return has_value(); }
-    
-    E& error() & { return *error_; }
-    const E& error() const & { return *error_; }
 };
 
 // Helper function to replace std::to_underlying
@@ -362,7 +395,7 @@ public:
             return unexpected(GenerationError::ConstraintsUnsatisfiable);
         }
         
-        return true;
+        return expected<bool, GenerationError>{std::in_place, true};
     }
     
     /**
@@ -509,7 +542,7 @@ public:
             in.read(reinterpret_cast<char*>(&tile), sizeof(ModularTile));
         }
         
-        return Level{std::move(level)};
+        return expected<Level, GenerationError>{std::in_place, std::move(level)};
     }
     
     const ModularTile& at(int x, int y) const { 
