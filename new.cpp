@@ -7,10 +7,10 @@ Layer multiple noise octaves for natural terrain diversity, implement true modul
 @approach
 - Multi-octave fractal noise for enhanced terrain variety
 - Modular tile system with variants, rotations, and connectivity rules
-- Comprehensive constraint validation with std::expected error handling
+- Comprehensive constraint validation with proper error handling
 - Interactive SDL2 debug visualizer with real-time feedback
 - Version-controlled binary serialization for production use
-- Modern C++23 features: concepts, ranges, coroutines, std::expected
+- Modern C++23 features with proper const-correctness and RAII
 
 @complexity
 Time: O(octaves * n*m) for generation, O(path_len*log|open|) for pathfinding
@@ -27,7 +27,6 @@ Space: O(n*m) for level data, O(1) for algorithms
 #include <algorithm>
 #include <unordered_map>
 #include <optional>
-#include <expected>
 #include <concepts>
 #include <iostream>
 #include <fstream>
@@ -38,12 +37,57 @@ Space: O(n*m) for level data, O(1) for algorithms
 #include <cmath>
 #include <numeric>
 
+// For C++23 std::expected - fallback for older compilers
+#if __cpp_lib_expected >= 202202L
+    #include <expected>
+#else
+    // Simple expected implementation for compatibility
+    template<typename T, typename E>
+    class expected {
+        union { T val; E err; };
+        bool has_val;
+    public:
+        expected(T&& v) : val(std::move(v)), has_val(true) {}
+        expected(const T& v) : val(v), has_val(true) {}
+        
+        template<typename U>
+        expected(U&& e) requires std::convertible_to<U, E> : err(std::forward<U>(e)), has_val(false) {}
+        
+        ~expected() {
+            if (has_val) val.~T();
+            else err.~E();
+        }
+        
+        bool has_value() const noexcept { return has_val; }
+        explicit operator bool() const noexcept { return has_val; }
+        
+        T& operator*() & { return val; }
+        const T& operator*() const & { return val; }
+        T&& operator*() && { return std::move(val); }
+        
+        E& error() & { return err; }
+        const E& error() const & { return err; }
+    };
+    
+    template<typename E>
+    struct unexpected {
+        E value;
+        explicit unexpected(E&& e) : value(std::move(e)) {}
+        explicit unexpected(const E& e) : value(e) {}
+    };
+    
+    namespace std {
+        using ::expected;
+        using ::unexpected;
+    }
+#endif
+
 // Enhanced Perlin noise with multi-octave support
 namespace noise {
 
 constexpr float fade(float t) noexcept { return t * t * t * (t * (t * 6 - 15) + 10); }
 constexpr float lerp(float t, float a, float b) noexcept { return a + t * (b - a); }
-constexpr int fastfloor(float x) noexcept { return (x > 0) ? (int)x : (int)x - 1; }
+constexpr int fastfloor(float x) noexcept { return (x > 0) ? static_cast<int>(x) : static_cast<int>(x) - 1; }
 
 struct Perlin {
     std::array<int, 512> p;
@@ -57,20 +101,26 @@ struct Perlin {
     
     constexpr float grad(int hash, float x, float y) const noexcept {
         const int h = hash & 3;
-        const float u = h < 2 ? x : y, v = h < 2 ? y : x;
+        const float u = h < 2 ? x : y;
+        const float v = h < 2 ? y : x;
         return ((h & 1) ? -u : u) + ((h & 2) ? -2.0f * v : 2.0f * v);
     }
     
     float noise(float x, float y) const noexcept {
-        int xi = fastfloor(x) & 255, yi = fastfloor(y) & 255;
-        float xf = x - fastfloor(x), yf = y - fastfloor(y);
-        float u = fade(xf), v = fade(yf);
-        int aaa = p[p[xi] + yi];
-        int aba = p[p[xi] + yi + 1];
-        int baa = p[p[xi + 1] + yi];
-        int bba = p[p[xi + 1] + yi + 1];
-        float x1 = lerp(u, grad(aaa, xf, yf), grad(baa, xf - 1, yf));
-        float x2 = lerp(u, grad(aba, xf, yf - 1), grad(bba, xf - 1, yf - 1));
+        const int xi = fastfloor(x) & 255;
+        const int yi = fastfloor(y) & 255;
+        const float xf = x - fastfloor(x);
+        const float yf = y - fastfloor(y);
+        const float u = fade(xf);
+        const float v = fade(yf);
+        
+        const int aaa = p[p[xi] + yi];
+        const int aba = p[p[xi] + yi + 1];
+        const int baa = p[p[xi + 1] + yi];
+        const int bba = p[p[xi + 1] + yi + 1];
+        
+        const float x1 = lerp(u, grad(aaa, xf, yf), grad(baa, xf - 1, yf));
+        const float x2 = lerp(u, grad(aba, xf, yf - 1), grad(bba, xf - 1, yf - 1));
         return 0.5f * (lerp(v, x1, x2) + 1.0f);
     }
     
@@ -85,7 +135,8 @@ struct Perlin {
         constexpr std::array<float, 6> frequencies{0.02f, 0.04f, 0.08f, 0.16f, 0.32f, 0.64f};
         
         float result = 0.0f;
-        for (int i = 0; i < std::min(octaves, 6); ++i) {
+        const int maxOctaves = std::min(octaves, 6);
+        for (int i = 0; i < maxOctaves; ++i) {
             result += amplitudes[i] * noise(frequencies[i] * x, frequencies[i] * y);
         }
         return result;
@@ -97,12 +148,12 @@ struct Perlin {
 // Enhanced modular tile system
 using Coord = std::pair<int, int>;
 
-enum class TerrainType : uint8_t {
+enum class TerrainType : std::uint8_t {
     Water, Plain, Forest, Mountain, Path, POI, Start
 };
 
-enum class TileVariant : uint8_t { A, B, C, D };
-enum class TileRotation : uint8_t { Deg0, Deg90, Deg180, Deg270 };
+enum class TileVariant : std::uint8_t { A, B, C, D };
+enum class TileRotation : std::uint8_t { Deg0, Deg90, Deg180, Deg270 };
 
 struct ModularTile {
     TerrainType baseType{TerrainType::Plain};
@@ -140,17 +191,17 @@ struct LevelConstraints {
     template<typename Level>
     bool validate(const Level& level) const {
         // Check walkable ratio
-        int walkableCount = std::ranges::count_if(level.grid, 
-            [](const auto& tile) { return tile.walkable; });
-        float walkableRatio = static_cast<float>(walkableCount) / level.grid.size();
+        const int walkableCount = static_cast<int>(std::ranges::count_if(level.grid, 
+            [](const auto& tile) { return tile.walkable; }));
+        const float walkableRatio = static_cast<float>(walkableCount) / static_cast<float>(level.grid.size());
         if (walkableRatio < minWalkableRatio) return false;
         
         // Check POI distances
         for (size_t i = 0; i < level.pois.size(); ++i) {
             for (size_t j = i + 1; j < level.pois.size(); ++j) {
-                auto [x1, y1] = level.pois[i];
-                auto [x2, y2] = level.pois[j];
-                int dist = std::abs(x1 - x2) + std::abs(y1 - y2);
+                const auto [x1, y1] = level.pois[i];
+                const auto [x2, y2] = level.pois[j];
+                const int dist = std::abs(x1 - x2) + std::abs(y1 - y2);
                 if (dist < minPOIDistance || dist > maxPOIDistance) return false;
             }
         }
@@ -171,14 +222,14 @@ enum class GenerationError {
 /**
  * @tagline Enhanced Level class with modular tiles and comprehensive error handling
  * @intuition Use modern C++23 features for robust, maintainable level generation
- * @approach Modular tile system with constraint validation and std::expected error handling
+ * @approach Modular tile system with constraint validation and proper error handling
  * @complexity Time: O(n*m) for basic operations, Space: O(n*m) for storage
  */
 class Level {
 public:
-    static constexpr uint32_t FORMAT_VERSION = 2;
+    static constexpr std::uint32_t FORMAT_VERSION = 2;
     
-    Level(int w, int h) : width(w), height(h), grid(w * h) {}
+    Level(int w, int h) : width(w), height(h), grid(static_cast<size_t>(w) * static_cast<size_t>(h)) {}
     
     int width, height;
     std::vector<ModularTile> grid;
@@ -188,11 +239,11 @@ public:
     
     /**
      * @tagline Robust level generation with comprehensive error handling
-     * @intuition Use std::expected for clean error propagation without exceptions
+     * @intuition Use expected pattern for clean error propagation without exceptions
      * @approach Try generation with backoff, returning specific error codes
      * @complexity Time: O(attempts * generation_time), Space: O(n*m)
      */
-    std::expected<bool, GenerationError> generate(uint32_t seed = 42, int numPOI = 5) {
+    std::expected<bool, GenerationError> generate(std::uint32_t seed = 42, int numPOI = 5) {
         noise::Perlin perlin(seed);
         std::mt19937 rng(seed);
         
@@ -200,7 +251,7 @@ public:
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 auto& tile = at(x, y);
-                tile.elevation = perlin.fractalNoise(x, y, constraints.noiseOctaves);
+                tile.elevation = perlin.fractalNoise(static_cast<float>(x), static_cast<float>(y), constraints.noiseOctaves);
                 
                 // Assign tile variants and rotations for diversity
                 std::uniform_int_distribution<> variantDist(0, 3);
@@ -228,18 +279,18 @@ public:
         }
         
         // 2. Place player start
-        if (auto startResult = placePlayerStart(rng); !startResult) {
+        if (!placePlayerStart(rng)) {
             return std::unexpected(GenerationError::InsufficientWalkableArea);
         }
         
         // 3. Place POIs with distance constraints
-        if (auto poiResult = placePOIs(rng, numPOI); !poiResult) {
+        if (!placePOIs(rng, numPOI)) {
             return std::unexpected(GenerationError::ConstraintsUnsatisfiable);
         }
         
         // 4. Ensure connectivity
         if (constraints.requireAllPOIsConnected) {
-            if (auto pathResult = ensureConnectivity(); !pathResult) {
+            if (!ensureConnectivity()) {
                 return std::unexpected(GenerationError::PathfindingFailed);
             }
         }
@@ -261,14 +312,16 @@ public:
     std::optional<std::vector<Coord>> findPath(const Coord& start, const Coord& end) const {
         constexpr std::array<Coord, 4> directions{{{0,1},{1,0},{0,-1},{-1,0}}};
         
-        std::vector<std::vector<float>> cost(height, std::vector<float>(width, INFINITY));
-        std::vector<std::vector<Coord>> parent(height, std::vector<Coord>(width, {-1, -1}));
+        std::vector<std::vector<float>> cost(static_cast<size_t>(height), 
+            std::vector<float>(static_cast<size_t>(width), std::numeric_limits<float>::infinity()));
+        std::vector<std::vector<Coord>> parent(static_cast<size_t>(height), 
+            std::vector<Coord>(static_cast<size_t>(width), {-1, -1}));
         
-        auto heuristic = [](const Coord& a, const Coord& b) {
+        const auto heuristic = [](const Coord& a, const Coord& b) {
             return static_cast<float>(std::abs(a.first - b.first) + std::abs(a.second - b.second));
         };
         
-        auto getTerrainCost = [](TerrainType type) {
+        const auto getTerrainCost = [](TerrainType type) {
             switch (type) {
                 case TerrainType::Plain: return 1.0f;
                 case TerrainType::Forest: return 1.5f;
@@ -280,16 +333,16 @@ public:
         using PQItem = std::pair<float, Coord>;
         std::priority_queue<PQItem, std::vector<PQItem>, std::greater<>> pq;
         
-        cost[start.second][start.first] = 0.0f;
+        cost[static_cast<size_t>(start.second)][static_cast<size_t>(start.first)] = 0.0f;
         pq.emplace(heuristic(start, end), start);
         
         while (!pq.empty()) {
-            auto [f, current] = pq.top();
+            const auto [f, current] = pq.top();
             pq.pop();
             
             if (current == end) {
                 std::vector<Coord> path;
-                for (Coord pos = end; pos != start; pos = parent[pos.second][pos.first]) {
+                for (Coord pos = end; pos != start; pos = parent[static_cast<size_t>(pos.second)][static_cast<size_t>(pos.first)]) {
                     path.push_back(pos);
                 }
                 path.push_back(start);
@@ -298,8 +351,9 @@ public:
             }
             
             for (int dir = 0; dir < 4; ++dir) {
-                auto [dx, dy] = directions[dir];
-                int nx = current.first + dx, ny = current.second + dy;
+                const auto [dx, dy] = directions[static_cast<size_t>(dir)];
+                const int nx = current.first + dx;
+                const int ny = current.second + dy;
                 
                 if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
                 
@@ -308,11 +362,11 @@ public:
                 
                 if (!nextTile.walkable || !currentTile.canConnect(nextTile, dir)) continue;
                 
-                float newCost = cost[current.second][current.first] + getTerrainCost(nextTile.baseType);
+                const float newCost = cost[static_cast<size_t>(current.second)][static_cast<size_t>(current.first)] + getTerrainCost(nextTile.baseType);
                 
-                if (newCost < cost[ny][nx]) {
-                    cost[ny][nx] = newCost;
-                    parent[ny][nx] = current;
+                if (newCost < cost[static_cast<size_t>(ny)][static_cast<size_t>(nx)]) {
+                    cost[static_cast<size_t>(ny)][static_cast<size_t>(nx)] = newCost;
+                    parent[static_cast<size_t>(ny)][static_cast<size_t>(nx)] = current;
                     pq.emplace(newCost + heuristic({nx, ny}, end), Coord{nx, ny});
                 }
             }
@@ -339,7 +393,7 @@ public:
         out.write(reinterpret_cast<const char*>(&playerStart), sizeof(playerStart));
         
         // Write POIs
-        size_t poiCount = pois.size();
+        const auto poiCount = static_cast<std::uint32_t>(pois.size());
         out.write(reinterpret_cast<const char*>(&poiCount), sizeof(poiCount));
         if (poiCount > 0) {
             out.write(reinterpret_cast<const char*>(pois.data()), sizeof(Coord) * poiCount);
@@ -354,7 +408,7 @@ public:
     }
     
     static std::expected<Level, GenerationError> deserialize(std::istream& in) {
-        uint32_t version;
+        std::uint32_t version;
         if (!in.read(reinterpret_cast<char*>(&version), sizeof(version))) {
             return std::unexpected(GenerationError::SerializationFailed);
         }
@@ -376,7 +430,7 @@ public:
         level.constraints = constraints;
         level.playerStart = playerStart;
         
-        size_t poiCount;
+        std::uint32_t poiCount;
         in.read(reinterpret_cast<char*>(&poiCount), sizeof(poiCount));
         level.pois.resize(poiCount);
         if (poiCount > 0) {
@@ -390,8 +444,12 @@ public:
         return level;
     }
     
-    const ModularTile& at(int x, int y) const { return grid[y * width + x]; }
-    ModularTile& at(int x, int y) { return grid[y * width + x]; }
+    const ModularTile& at(int x, int y) const { 
+        return grid[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)]; 
+    }
+    ModularTile& at(int x, int y) { 
+        return grid[static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)]; 
+    }
     
 private:
     bool placePlayerStart(std::mt19937& rng) {
@@ -399,7 +457,8 @@ private:
         std::uniform_int_distribution<> distY(0, height - 1);
         
         for (int attempt = 0; attempt < 1000; ++attempt) {
-            int x = distX(rng), y = distY(rng);
+            const int x = distX(rng);
+            const int y = distY(rng);
             auto& tile = at(x, y);
             if (tile.walkable && tile.elevation > constraints.waterLevel && tile.elevation < constraints.mountLevel) {
                 playerStart = {x, y};
@@ -416,13 +475,14 @@ private:
         std::uniform_int_distribution<> distY(0, height - 1);
         
         for (int placed = 0; placed < numPOI;) {
-            int x = distX(rng), y = distY(rng);
-            Coord candidate{x, y};
+            const int x = distX(rng);
+            const int y = distY(rng);
+            const Coord candidate{x, y};
             
             if (candidate == playerStart || !at(x, y).walkable) continue;
             
-            bool validDistance = std::ranges::all_of(pois, [&](const Coord& poi) {
-                int dist = std::abs(x - poi.first) + std::abs(y - poi.second);
+            const bool validDistance = std::ranges::all_of(pois, [&](const Coord& poi) {
+                const int dist = std::abs(x - poi.first) + std::abs(y - poi.second);
                 return dist >= constraints.minPOIDistance && dist <= constraints.maxPOIDistance;
             });
             
@@ -438,7 +498,7 @@ private:
     
     bool ensureConnectivity() {
         for (const auto& poi : pois) {
-            auto path = findPath(playerStart, poi);
+            const auto path = findPath(playerStart, poi);
             if (!path) return false;
             
             // Mark path tiles
@@ -458,6 +518,8 @@ private:
 #define SDL_MAIN_HANDLED
 #pragma comment(lib, "SDL2.lib")
 #endif
+
+// SDL2 headers - move to top to avoid header order issues
 #include <SDL2/SDL.h>
 
 namespace vis {
@@ -498,8 +560,8 @@ private:
     bool initialize(const Level& level) {
         if (SDL_Init(SDL_INIT_VIDEO) < 0) return false;
         
-        int windowWidth = level.width * CELL_SIZE + 2 * MARGIN + INFO_PANEL_WIDTH;
-        int windowHeight = level.height * CELL_SIZE + 2 * MARGIN;
+        const int windowWidth = level.width * CELL_SIZE + 2 * MARGIN + INFO_PANEL_WIDTH;
+        const int windowHeight = level.height * CELL_SIZE + 2 * MARGIN;
         
         window = SDL_CreateWindow("Level Debugger", 
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -531,12 +593,12 @@ private:
     
     void handleInput(const SDL_Event& event, const Level& level) {
         if (event.type == SDL_MOUSEMOTION) {
-            int mouseX = event.motion.x - MARGIN;
-            int mouseY = event.motion.y - MARGIN;
+            const int mouseX = event.motion.x - MARGIN;
+            const int mouseY = event.motion.y - MARGIN;
             
             if (mouseX >= 0 && mouseY >= 0) {
-                int cellX = mouseX / CELL_SIZE;
-                int cellY = mouseY / CELL_SIZE;
+                const int cellX = mouseX / CELL_SIZE;
+                const int cellY = mouseY / CELL_SIZE;
                 
                 if (cellX < level.width && cellY < level.height) {
                     hoveredCell = {cellX, cellY};
@@ -554,6 +616,7 @@ private:
                 case SDLK_c: showConnections = !showConnections; break;
                 case SDLK_v: showVariants = !showVariants; break;
                 case SDLK_ESCAPE: selectedCell = {-1, -1}; break;
+                default: break;
             }
         }
     }
@@ -573,14 +636,14 @@ private:
         for (int y = 0; y < level.height; ++y) {
             for (int x = 0; x < level.width; ++x) {
                 const auto& tile = level.at(x, y);
-                SDL_Rect rect{
+                const SDL_Rect rect{
                     MARGIN + x * CELL_SIZE,
                     MARGIN + y * CELL_SIZE,
                     CELL_SIZE,
                     CELL_SIZE
                 };
                 
-                SDL_Color color = getTileColor(tile, showElevation, showVariants);
+                const SDL_Color color = getTileColor(tile, showElevation, showVariants);
                 SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
                 SDL_RenderFillRect(renderer, &rect);
                 
@@ -605,10 +668,10 @@ private:
         // Draw paths between POIs
         SDL_SetRenderDrawColor(renderer, 255, 255, 0, 200);
         for (const auto& poi : level.pois) {
-            if (auto path = level.findPath(level.playerStart, poi)) {
+            if (const auto path = level.findPath(level.playerStart, poi)) {
                 for (size_t i = 1; i < path->size(); ++i) {
-                    auto [x1, y1] = (*path)[i-1];
-                    auto [x2, y2] = (*path)[i];
+                    const auto [x1, y1] = (*path)[i-1];
+                    const auto [x2, y2] = (*path)[i];
                     SDL_RenderDrawLine(renderer,
                         MARGIN + x1 * CELL_SIZE + CELL_SIZE/2,
                         MARGIN + y1 * CELL_SIZE + CELL_SIZE/2,
@@ -620,11 +683,11 @@ private:
     }
     
     void drawInfoPanel(const Level& level) {
-        int panelX = MARGIN + level.width * CELL_SIZE + 20;
-        int panelY = MARGIN;
+        const int panelX = MARGIN + level.width * CELL_SIZE + 20;
+        const int panelY = MARGIN;
         
         // Draw panel background
-        SDL_Rect panelRect{panelX, panelY, INFO_PANEL_WIDTH - 20, level.height * CELL_SIZE};
+        const SDL_Rect panelRect{panelX, panelY, INFO_PANEL_WIDTH - 20, level.height * CELL_SIZE};
         SDL_SetRenderDrawColor(renderer, 40, 40, 40, 200);
         SDL_RenderFillRect(renderer, &panelRect);
         
@@ -633,8 +696,8 @@ private:
             const auto& tile = level.at(selectedCell.first, selectedCell.second);
             
             // Draw color swatch for selected tile
-            SDL_Rect swatch{panelX + 10, panelY + 10, 20, 20};
-            SDL_Color color = getTileColor(tile, false, false);
+            const SDL_Rect swatch{panelX + 10, panelY + 10, 20, 20};
+            const SDL_Color color = getTileColor(tile, false, false);
             SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
             SDL_RenderFillRect(renderer, &swatch);
         }
@@ -642,8 +705,8 @@ private:
     
     void drawTileConnections(const ModularTile& tile, const SDL_Rect& rect) {
         SDL_SetRenderDrawColor(renderer, 0, 255, 0, 128);
-        int centerX = rect.x + rect.w / 2;
-        int centerY = rect.y + rect.h / 2;
+        const int centerX = rect.x + rect.w / 2;
+        const int centerY = rect.y + rect.h / 2;
         
         // Draw connection indicators
         if (tile.connections[0]) // North
@@ -656,9 +719,9 @@ private:
             SDL_RenderDrawLine(renderer, centerX, centerY, rect.x, centerY);
     }
     
-    SDL_Color getTileColor(const ModularTile& tile, bool showElevation, bool showVariants) {
+    static SDL_Color getTileColor(const ModularTile& tile, bool showElevation, bool showVariants) {
         if (showElevation) {
-            uint8_t intensity = static_cast<uint8_t>(tile.elevation * 255);
+            const auto intensity = static_cast<std::uint8_t>(tile.elevation * 255);
             return {intensity, intensity, intensity, 255};
         }
         
@@ -676,10 +739,10 @@ private:
         
         if (showVariants) {
             // Slightly modify color based on variant
-            int variantOffset = static_cast<int>(tile.variant) * 10 - 15;
-            baseColor.r = std::clamp(static_cast<int>(baseColor.r) + variantOffset, 0, 255);
-            baseColor.g = std::clamp(static_cast<int>(baseColor.g) + variantOffset, 0, 255);
-            baseColor.b = std::clamp(static_cast<int>(baseColor.b) + variantOffset, 0, 255);
+            const int variantOffset = static_cast<int>(tile.variant) * 10 - 15;
+            baseColor.r = static_cast<std::uint8_t>(std::clamp(static_cast<int>(baseColor.r) + variantOffset, 0, 255));
+            baseColor.g = static_cast<std::uint8_t>(std::clamp(static_cast<int>(baseColor.g) + variantOffset, 0, 255));
+            baseColor.b = static_cast<std::uint8_t>(std::clamp(static_cast<int>(baseColor.b) + variantOffset, 0, 255));
         }
         
         return baseColor;
@@ -706,16 +769,18 @@ void previewLevel(const Level& level) {
  * @complexity Time: O(generations * level_complexity), Space: O(level_size)
  */
 int main() {
-    constexpr int width = 128, height = 96, numPOI = 8;
+    constexpr int width = 128;
+    constexpr int height = 96;
+    constexpr int numPOI = 8;
     
     // Test level generation with different seeds
-    std::vector<uint32_t> testSeeds{42, 12345, 99999, 
-        static_cast<uint32_t>(std::chrono::system_clock::now().time_since_epoch().count())};
+    const std::vector<std::uint32_t> testSeeds{42, 12345, 99999, 
+        static_cast<std::uint32_t>(std::chrono::system_clock::now().time_since_epoch().count())};
     
     Level bestLevel(width, height);
     bool generationSucceeded = false;
     
-    for (auto seed : testSeeds) {
+    for (const auto seed : testSeeds) {
         Level level(width, height);
         
         // Customize constraints for more diverse terrain
@@ -724,7 +789,7 @@ int main() {
         level.constraints.minPOIDistance = 12;
         level.constraints.maxPOIDistance = 35;
         
-        auto result = level.generate(seed, numPOI);
+        const auto result = level.generate(seed, numPOI);
         if (result) {
             std::cout << "✓ Level generated successfully with seed " << seed << std::endl;
             bestLevel = std::move(level);
@@ -744,12 +809,12 @@ int main() {
     // Test serialization round-trip
     {
         std::ofstream ofs("level_test.save", std::ios::binary);
-        auto saveResult = bestLevel.serialize(ofs);
+        const auto saveResult = bestLevel.serialize(ofs);
         ofs.close();
         
         if (saveResult) {
             std::ifstream ifs("level_test.save", std::ios::binary);
-            auto loadResult = Level::deserialize(ifs);
+            const auto loadResult = Level::deserialize(ifs);
             ifs.close();
             
             if (loadResult) {
@@ -757,10 +822,10 @@ int main() {
                 
                 // Verify data integrity
                 const auto& loaded = *loadResult;
-                bool dataIntegrityOk = (loaded.width == bestLevel.width && 
-                                       loaded.height == bestLevel.height &&
-                                       loaded.grid == bestLevel.grid &&
-                                       loaded.pois == bestLevel.pois);
+                const bool dataIntegrityOk = (loaded.width == bestLevel.width && 
+                                             loaded.height == bestLevel.height &&
+                                             loaded.grid == bestLevel.grid &&
+                                             loaded.pois == bestLevel.pois);
                 
                 std::cout << (dataIntegrityOk ? "✓" : "✗") 
                          << " Data integrity check " 
@@ -774,19 +839,19 @@ int main() {
     }
     
     // Performance metrics
-    auto startTime = std::chrono::high_resolution_clock::now();
-    int pathfindingTests = 100;
+    const auto startTime = std::chrono::high_resolution_clock::now();
+    constexpr int pathfindingTests = 100;
     int successfulPaths = 0;
     
     for (int i = 0; i < pathfindingTests; ++i) {
         if (bestLevel.pois.size() >= 2) {
-            auto path = bestLevel.findPath(bestLevel.pois[0], bestLevel.pois[1]);
+            const auto path = bestLevel.findPath(bestLevel.pois[0], bestLevel.pois[1]);
             if (path) ++successfulPaths;
         }
     }
     
-    auto endTime = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
+    const auto endTime = std::chrono::high_resolution_clock::now();
+    const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
     
     std::cout << "Performance: " << pathfindingTests << " pathfinding tests in " 
               << duration.count() << "μs (" << successfulPaths << " successful)" << std::endl;
